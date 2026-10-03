@@ -1,0 +1,9 @@
+python-pptx>=1.0.0
+pdfplumber>=0.11.0
+pymupdf>=1.24.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+requests>=2.31.0
+deep-translator>=1.11.0
+Pillow>=10.0.0
+reportlab>=4.0.0

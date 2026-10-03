@@ -1,0 +1,32 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Local caches / downloads
+downloads/
+*.pdf
+
+# Generated / local Office files
+*.pptx
+*.ppt
+
+# Temp inspect scripts
+_inspect_*.py
+_debug_*.py
+_test_*.py
+_probe_*.py
+_extract_*.py
+_check_*.py
+_clean_*.py
+_verify_*.py
+_dump_*.py
+_slide1_timing.xml
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
