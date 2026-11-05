@@ -256,7 +256,9 @@ def _extract_sections(body: str, ref: Optional[VerseRef]) -> List[StudySection]:
         r"[（(]"
         r"(?:馬可|可|羅|詩|林前|林後|腓|弗|雅|賽|太|路|約|徒|西|加|來)?"
         r"(?:福音)?"
-        r"(\d+)?[：:．.]?"
+        # Chapter number only counts when a colon follows it.
+        # （馬可9：30-37） is chapter 9; （馬可38-41） is verses 38–41.
+        r"(?:(\d+)\s*[：:．.]\s*)?"
         r"(\d+)\s*[-–—~至到]\s*(\d+)"
         r"[）)]"
     )

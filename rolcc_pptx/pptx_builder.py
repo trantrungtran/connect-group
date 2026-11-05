@@ -499,21 +499,38 @@ def _finalize_slide_zorder(slide):
 
 
 def _assign_questions_to_chunks(
-    questions: List[DiscussionQuestion], n_chunks: int
+    questions: List[DiscussionQuestion],
+    section_chunks: list,
+    sections: list | None = None,
 ) -> List[List[DiscussionQuestion]]:
-    """Place each question on its author section slide (section_index).
+    """Place each question on the slide for the PDF section it follows.
 
-    Falls back to even spread only for questions with no section assignment.
+    A section that is split across slides keeps its questions on the last of those slides,
+    which is where the PDF prints them. Questions with no section are spread across slides.
     """
+    n_chunks = len(section_chunks)
     out: List[List[DiscussionQuestion]] = [[] for _ in range(max(n_chunks, 1))]
     if not questions:
         return out
 
+    chunk_for_section: dict[int, int] = {}
+    for si, sec in enumerate(sections or []):
+        last = None
+        for ci, chunk in enumerate(section_chunks):
+            nums = chunk[0] if chunk else []
+            if nums and nums[0] <= sec.end and nums[-1] >= sec.start:
+                last = ci
+        if last is not None:
+            chunk_for_section[si] = last
+
     unassigned: List[DiscussionQuestion] = []
     for q in questions:
         idx = getattr(q, "section_index", -1)
-        if 0 <= idx < n_chunks:
-            out[idx].append(q)
+        chunk_idx = chunk_for_section.get(idx)
+        if chunk_idx is None and 0 <= idx < n_chunks and not sections:
+            chunk_idx = idx
+        if chunk_idx is not None:
+            out[chunk_idx].append(q)
         else:
             unassigned.append(q)
 
@@ -553,7 +570,9 @@ def build_presentation(
     section_chunks = chunk_by_sections(
         verse_nums, getattr(study, "sections", []) or [], max_per_slide=10
     )
-    q_chunks = _assign_questions_to_chunks(study.questions, len(section_chunks))
+    q_chunks = _assign_questions_to_chunks(
+        study.questions, section_chunks, getattr(study, "sections", []) or []
+    )
 
     for ci, (nums, sec_title_zh, sec_title_en) in enumerate(section_chunks):
         slide = prs.slides.add_slide(blank)

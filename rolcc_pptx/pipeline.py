@@ -112,7 +112,7 @@ def process_study(
             pass
 
     _log(progress, "Fetching NIV + Chinese Union Version text...")
-    niv, cuv = fetch_verses(study.ref)
+    niv, cuv = fetch_verses(study.ref, note=lambda m: _log(progress, m))
 
     _log(progress, "Translating commentary & questions to English…")
     enrich_with_english(study)

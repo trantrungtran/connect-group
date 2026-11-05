@@ -3,12 +3,24 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 import requests
+from bs4 import BeautifulSoup
 
 UA = {"User-Agent": "Mozilla/5.0 ROLCC-PPTX/1.0"}
+BG_UA = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+_BG_VERSE_CLASS = re.compile(r"^.+-(\d+)-(\d+)$")
 
 # Chinese short book names / abbreviations → (English name, bolls book id)
 BOOK_MAP = {
@@ -208,14 +220,181 @@ def _clean_cuv(text: str) -> str:
     return text.strip()
 
 
-def fetch_verses(ref: VerseRef) -> Tuple[Dict[int, str], Dict[int, str]]:
-    """Return (niv_en, cuv_zh) maps verse_num -> text."""
-    niv = _fetch_chapter("NIV", ref.book_id, ref.chapter)
+def _niv_unusable(text: str) -> bool:
+    """True when a verse is blank or bolls.life's NIV copyright refusal."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return True
+    lowered = cleaned.lower()
+    return "prohibited me from using the niv" in lowered or "biblica, inc." in lowered
+
+
+def _missing_verse_nums(texts: Dict[int, str], ref: VerseRef) -> List[int]:
+    return [n for n in ref.verse_numbers() if _niv_unusable(texts.get(n, ""))]
+
+
+def _biblegateway_query(ref: VerseRef) -> str:
+    if ref.start == ref.end:
+        return f"{ref.book_en} {ref.chapter}:{ref.start}"
+    return f"{ref.book_en} {ref.chapter}:{ref.start}-{ref.end}"
+
+
+def _biblegateway_passage_url(ref: VerseRef) -> str:
+    """Passage page linked from the NIV version page on Bible Gateway."""
+    return (
+        "https://www.biblegateway.com/passage/?search="
+        + quote(_biblegateway_query(ref), safe=":")
+        + "&version=NIV"
+    )
+
+
+def _biblegateway_span_text(span) -> str:
+    """Passage wording as shown on the page, without footnote or cross-reference marks.
+
+    NIV shows Mark 9:44 and 9:46 as bracketed numbers only. Keep that marker.
+    """
+    markers = [
+        node.get_text(" ", strip=True)
+        for node in span.select("sup.versenum")
+    ]
+    for node in span.select(
+        "sup.footnote, sup.crossreference, sup.versenum, span.chapternum"
+    ):
+        node.decompose()
+    text = re.sub(r"\s+", " ", span.get_text(" ", strip=True)).strip()
+    if text:
+        return text
+    bracketed = [m for m in markers if m.startswith("[") and m.endswith("]")]
+    return " ".join(bracketed)
+
+
+def _fetch_niv_biblegateway(ref: VerseRef) -> Dict[int, str]:
+    """NIV verses from the Bible Gateway passage page for this reference."""
+    query = _biblegateway_query(ref)
+    url = _biblegateway_passage_url(ref)
+    response = None
+    last_error: Optional[BaseException] = None
+    for attempt in range(3):
+        try:
+            response = requests.get(url, headers=BG_UA, timeout=45)
+            response.raise_for_status()
+            break
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            if status and status < 500:
+                raise
+            last_error = exc
+            response = None
+        except requests.RequestException as exc:
+            last_error = exc
+            response = None
+        if attempt < 2:
+            time.sleep(0.6)
+    if response is None:
+        raise RuntimeError(f"Bible Gateway request failed for {query}") from last_error
+    soup = BeautifulSoup(response.text, "lxml")
+    root = soup.select_one("div.version-NIV.result-text-style-normal")
+    box = root.select_one(".std-text") if root is not None else None
+    if box is None:
+        raise RuntimeError(f"Bible Gateway did not return NIV text for {query}")
+
+    parts: Dict[int, List[str]] = {}
+    for span in box.select("span.text"):
+        if span.find_parent(["h1", "h2", "h3", "h4", "h5"]):
+            continue
+        if span.find_parent("span", class_="text"):
+            continue
+        verse_no = None
+        chapter_no = None
+        for cls in span.get("class") or []:
+            match = _BG_VERSE_CLASS.match(cls)
+            if match:
+                chapter_no = int(match.group(1))
+                verse_no = int(match.group(2))
+                break
+        if verse_no is None or chapter_no != ref.chapter:
+            continue
+        if verse_no < ref.start or verse_no > ref.end:
+            continue
+        text = _biblegateway_span_text(span)
+        if text:
+            parts.setdefault(verse_no, []).append(text)
+
+    out = {n: " ".join(chunks).strip() for n, chunks in parts.items()}
+    if not out:
+        raise RuntimeError(f"Bible Gateway NIV passage was empty for {query}")
+    return out
+
+
+def fetch_verses(
+    ref: VerseRef,
+    note: Optional[Callable[[str], None]] = None,
+) -> Tuple[Dict[int, str], Dict[int, str]]:
+    """Return (niv_en, cuv_zh) maps verse_num -> text.
+
+    NIV is read from the Bible Gateway passage page for the reference
+    (the same pages linked from the NIV version list). Chinese Union Version
+    still comes from bolls.life.
+    """
+    def say(msg: str) -> None:
+        if note:
+            note(msg)
+
+    passage_url = _biblegateway_passage_url(ref)
+    say(f"Fetching NIV from Bible Gateway…\n{passage_url}")
+    niv: Dict[int, str] = {}
+    gateway_error: Optional[BaseException] = None
+    try:
+        niv = _fetch_niv_biblegateway(ref)
+    except Exception as exc:  # noqa: BLE001 — fall back if the passage page fails
+        gateway_error = exc
+        say(f"Bible Gateway NIV page failed ({exc}). Trying bolls.life…")
+        try:
+            niv = _fetch_chapter("NIV", ref.book_id, ref.chapter)
+        except Exception as boll_exc:
+            raise RuntimeError(
+                "Could not fetch NIV text from Bible Gateway "
+                f"({exc}) or bolls.life ({boll_exc})."
+            ) from boll_exc
+
+    missing = _missing_verse_nums(niv, ref)
+    if missing and gateway_error is None:
+        say(
+            "Bible Gateway is missing verses "
+            f"{_verse_span(missing)}. Trying bolls.life…"
+        )
+        try:
+            boll = _fetch_chapter("NIV", ref.book_id, ref.chapter)
+        except Exception as exc:  # noqa: BLE001
+            say(f"bolls.life NIV failed ({exc}).")
+            boll = {}
+        for n in list(missing):
+            if not _niv_unusable(boll.get(n, "")):
+                niv[n] = boll[n]
+        missing = _missing_verse_nums(niv, ref)
+    if missing:
+        source = "Bible Gateway and bolls.life" if gateway_error is None else "bolls.life"
+        raise RuntimeError(
+            f"NIV text still missing for verses {_verse_span(missing)} after {source}."
+        )
+    if gateway_error is None:
+        say("Using NIV text from Bible Gateway.")
+
     cuv = _fetch_chapter("CUV", ref.book_id, ref.chapter)
     cuv = {k: _clean_cuv(v) for k, v in cuv.items()}
     en = {n: niv.get(n, "") for n in ref.verse_numbers()}
     zh = {n: cuv.get(n, "") for n in ref.verse_numbers()}
     return en, zh
+
+
+def _verse_span(nums: List[int]) -> str:
+    if not nums:
+        return ""
+    if nums == list(range(nums[0], nums[-1] + 1)):
+        if nums[0] == nums[-1]:
+            return str(nums[0])
+        return f"{nums[0]}–{nums[-1]}"
+    return ", ".join(str(n) for n in nums)
 
 
 def chunk_verses(verse_nums: List[int], max_per_slide: int = 7) -> List[List[int]]:
